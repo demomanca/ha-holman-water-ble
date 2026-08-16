@@ -82,8 +82,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # and reload the entry so per-zone entities match the real device.
     async def _persist_device_type_and_reload(corrected_type: int) -> None:
         try:
-            await entry.async_update_entry(
-                data={**entry.data, "device_type": corrected_type}
+            if entry.data.get("device_type", 0) == corrected_type:
+                return
+            hass.config_entries.async_update_entry(
+                entry, data={**entry.data, "device_type": corrected_type}
             )
         except Exception as exc:
             _LOGGER.error(
@@ -129,6 +131,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         model=device_config.model,
         sw_version=f"Type {device_type} ({device_config.model})",
     )
+
+    # `async_get_or_create` does not rewrite `name`, `model`, or
+    # `sw_version` on an existing device, so refresh the registry entry
+    # when the stored device type was corrected and the entry reloaded
+    # (e.g. BX1 -> BX2). `name` only updates the default name; a name
+    # the user set in the UI still takes precedence.
+    expected_sw_version = f"Type {device_type} ({device_config.model})"
+    device_info = device_registry.async_get_device(
+        identifiers={(DOMAIN, mac_address)}
+    )
+    if device_info is not None and (
+        device_info.model != device_config.model
+        or device_info.sw_version != expected_sw_version
+    ):
+        device_registry.async_update_device(
+            device_info.id,
+            name=device_config.name,
+            model=device_config.model,
+            sw_version=expected_sw_version,
+        )
 
     # Forward to entity platforms
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
