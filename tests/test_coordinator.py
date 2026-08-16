@@ -235,6 +235,76 @@ class TestHolmanWaterCoordinator:
 
     @pytest.mark.asyncio
     @patch("custom_components.holman_water_ble.coordinator.HolmanBLE")
+    async def test_read_diagnostics_corrects_device_type(
+        self, mock_holman_ble_cls, coordinator
+    ):
+        """Test that a reported type different from the configured one updates config."""
+        mock_client = MagicMock()
+        mock_client.connect = AsyncMock(return_value=True)
+        mock_client.authenticate = AsyncMock(return_value=True)
+        # Device reports type 6 (BX2) but coordinator was configured as BX1
+        mock_client.read_device_info = AsyncMock(return_value=DeviceInfo(
+            firmware_version=3,
+            protocol_version=2,
+            device_type=6,
+            voltage_dc=5.2,
+        ))
+        mock_client.clear_schedules = AsyncMock(return_value=True)
+        mock_client.set_current_time = AsyncMock(return_value=True)
+        mock_client.disconnect = AsyncMock()
+        mock_holman_ble_cls.return_value = mock_client
+
+        coordinator._passcode_store.set("AA:BB:CC:DD:EE:FF", 12345)
+
+        corrections = []
+        coordinator.register_device_type_changed_callback(
+            lambda: corrections.append(1)
+        )
+
+        await coordinator.read_diagnostics()
+
+        assert len(corrections) == 1
+        assert coordinator.device_config.model == "BX2"
+        assert coordinator.device_config.total_zones == 2
+        # New zone should have been backfilled with the default duration
+        assert coordinator.get_watering_duration(2) == 10
+
+    @pytest.mark.asyncio
+    @patch("custom_components.holman_water_ble.coordinator.HolmanBLE")
+    async def test_read_diagnostics_no_type_change(
+        self, mock_holman_ble_cls, coordinator
+    ):
+        """Test that a matching reported type does not trigger a correction."""
+        mock_client = MagicMock()
+        mock_client.connect = AsyncMock(return_value=True)
+        mock_client.authenticate = AsyncMock(return_value=True)
+        # Device reports type 100 (BX1) - matches the configured BX1
+        mock_client.read_device_info = AsyncMock(return_value=DeviceInfo(
+            firmware_version=3,
+            protocol_version=2,
+            device_type=100,
+            voltage_dc=5.2,
+        ))
+        mock_client.clear_schedules = AsyncMock(return_value=True)
+        mock_client.set_current_time = AsyncMock(return_value=True)
+        mock_client.disconnect = AsyncMock()
+        mock_holman_ble_cls.return_value = mock_client
+
+        coordinator._passcode_store.set("AA:BB:CC:DD:EE:FF", 12345)
+
+        corrections = []
+        coordinator.register_device_type_changed_callback(
+            lambda: corrections.append(1)
+        )
+
+        await coordinator.read_diagnostics()
+
+        assert len(corrections) == 0
+        assert coordinator.device_config.model == "BX1"
+        assert coordinator.device_config.total_zones == 1
+
+    @pytest.mark.asyncio
+    @patch("custom_components.holman_water_ble.coordinator.HolmanBLE")
     async def test_start_watering(self, mock_holman_ble_cls, coordinator):
         """Test starting watering."""
         mock_client = MagicMock()

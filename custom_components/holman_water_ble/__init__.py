@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import CONF_MAC, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
@@ -76,6 +76,47 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = coordinator
+
+    # Entries created before the device's real type was known default to BX1
+    # above. Once a diagnostics read identifies a different type, persist it
+    # and reload the entry so per-zone entities match the real device.
+    async def _persist_device_type_and_reload(corrected_type: int) -> None:
+        try:
+            await entry.async_update_entry(
+                data={**entry.data, "device_type": corrected_type}
+            )
+        except Exception as exc:
+            _LOGGER.error(
+                "Failed to persist device type %d for %s: %s",
+                corrected_type,
+                mac_address,
+                exc,
+            )
+            return
+        if entry.state is not ConfigEntryState.LOADED:
+            return
+        await hass.config_entries.async_reload(entry.entry_id)
+
+    def _handle_device_type_changed() -> None:
+        if entry.state is not ConfigEntryState.LOADED:
+            return
+        info = coordinator.device_info
+        if info is None:
+            return
+        new_type = info.device_type
+        if entry.data.get("device_type", 0) == new_type:
+            return
+        _LOGGER.info(
+            "Correcting device type for %s: %d -> %d",
+            mac_address,
+            entry.data.get("device_type", 0),
+            new_type,
+        )
+        # Defer to a task: this callback fires from within a tracked
+        # coordinator task, so awaiting the reload here would deadlock.
+        hass.async_create_task(_persist_device_type_and_reload(new_type))
+
+    coordinator.register_device_type_changed_callback(_handle_device_type_changed)
 
     # Register device in device registry
     device_registry = dr.async_get(hass)

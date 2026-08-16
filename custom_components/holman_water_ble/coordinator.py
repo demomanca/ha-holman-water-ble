@@ -18,6 +18,7 @@ from bleak.backends.device import BLEDevice
 from .const import (
     DEFAULT_POLL_INTERVAL_HOURS,
     DEFAULT_WATERING_DURATION_MINUTES,
+    DEVICE_TYPE_MAP,
     DOMAIN,
     PASSCODE_FILENAME,
     WATERING_COMPLETION_MARGIN_SECONDS,
@@ -68,6 +69,8 @@ class HolmanWaterCoordinator:
         self._watering_end_times: dict[int, datetime] = {}
         # Callbacks to notify entities of state changes
         self._state_update_callbacks: list[Callable] = []
+        # Callbacks to notify when the identified device type changes
+        self._device_type_changed_callbacks: list[Callable[[], None]] = []
 
         # Initialize default durations
         for zone in range(1, device_config.total_zones + 1):
@@ -190,6 +193,76 @@ class HolmanWaterCoordinator:
             except Exception as exc:
                 _LOGGER.warning("State callback error: %s", exc)
 
+    def register_device_type_changed_callback(
+        self, callback: Callable[[], None]
+    ) -> None:
+        """Register a callback to be called when the identified device type changes."""
+        self._device_type_changed_callbacks.append(callback)
+
+    def unregister_device_type_changed_callback(
+        self, callback: Callable[[], None]
+    ) -> None:
+        """Unregister a previously registered device type change callback."""
+        if callback in self._device_type_changed_callbacks:
+            self._device_type_changed_callbacks.remove(callback)
+
+    def _notify_device_type_changed(self) -> None:
+        """Notify all registered callbacks that the device type changed."""
+        for cb in self._device_type_changed_callbacks:
+            try:
+                cb()
+            except Exception as exc:
+                _LOGGER.warning("Device type callback error: %s", exc)
+
+    def _maybe_update_device_type(self) -> None:
+        """Re-derive the device config from the latest diagnostics read.
+
+        Config entries created before the device's real type was known
+        default to BX1. Once a diagnostics read reports a different model
+        or zone count, update the local config and notify listeners so
+        the config entry can self-correct.
+        """
+        info = self._device_info
+        if info is None:
+            return
+
+        type_info = DEVICE_TYPE_MAP.get(info.device_type)
+        if type_info is None:
+            _LOGGER.warning(
+                "Unknown device type %d for %s",
+                info.device_type,
+                self.mac_address,
+            )
+            return
+
+        model, name, total_zones, is_ac_device = type_info
+        current = self._device_config
+        if (
+            model == current.model
+            and total_zones == current.total_zones
+            and is_ac_device == current.is_ac_device
+        ):
+            return
+
+        _LOGGER.info(
+            "Device %s identified as %s (type %d, %d zones); was %s (%d zones)",
+            self.mac_address,
+            model,
+            info.device_type,
+            total_zones,
+            current.model,
+            current.total_zones,
+        )
+        self._device_config = DeviceConfig(
+            model=model,
+            name=name,
+            total_zones=total_zones,
+            is_ac_device=is_ac_device,
+        )
+        for zone in range(1, total_zones + 1):
+            self._watering_durations.setdefault(zone, DEFAULT_WATERING_DURATION_MINUTES)
+        self._notify_device_type_changed()
+
     def start_polling(self) -> None:
         """Start the periodic health check poll loop."""
         if self._poll_task is not None:
@@ -306,6 +379,7 @@ class HolmanWaterCoordinator:
 
         result = await self._operate(_read)
         if result is not None:
+            self._maybe_update_device_type()
             self._notify_state_update()
         return result
 
@@ -479,6 +553,7 @@ class HolmanWaterCoordinator:
                 info = await client.read_device_info()
                 if info is not None:
                     self._device_info = info
+                    self._maybe_update_device_type()
 
                 self._notify_state_update()
                 return True

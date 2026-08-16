@@ -18,10 +18,23 @@ from .const import (
     DEVICE_TYPE_MAP,
     DOMAIN,
     MANUFACTURER,
+    SCAN_DEVICE_TYPE_OFFSET,
     SERVICE_UUID,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _extract_device_type(
+    manufacturer_data: Optional[dict[int, bytes]]
+) -> Optional[int]:
+    """Extract the Holman device type from BLE manufacturer data."""
+    if not manufacturer_data:
+        return None
+    for mfr_data in manufacturer_data.values():
+        if len(mfr_data) > SCAN_DEVICE_TYPE_OFFSET:
+            return mfr_data[SCAN_DEVICE_TYPE_OFFSET]
+    return None
 
 
 class HolmanWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -56,11 +69,7 @@ class HolmanWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         # If we have manufacturer data, try to show more context
         # at the confirm step
-        if self._discovery_info and self._discovery_info.manufacturer_data:
-            for mfr_data in self._discovery_info.manufacturer_data.values():
-                if len(mfr_data) > 33:
-                    self._device_type = mfr_data[33]
-                    break
+        self._device_type = _extract_device_type(discovery_info.manufacturer_data)
 
         self.context["title_placeholders"] = {
             "name": self._device_name,
@@ -88,7 +97,15 @@ class HolmanWaterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._abort_if_unique_id_configured()
             self._mac_address = mac
             self._device_name = user_input.get("name", "Holman Water Device")
-            self._device_type = user_input.get("device_type")
+            # The form only captures the MAC, so recover the device type
+            # (and a real name) from any tracked advertisement we still have.
+            for info in async_discovered_service_info(self.hass):
+                if info.address.lower() == mac.lower():
+                    self._device_name = info.name or self._device_name
+                    self._device_type = _extract_device_type(
+                        info.manufacturer_data
+                    )
+                    break
             return await self.async_step_confirm()
 
         # Show discovered devices
